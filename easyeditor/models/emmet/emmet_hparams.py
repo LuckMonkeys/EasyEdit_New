@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Literal
 
 from ...util.hparams import HyperParams
@@ -20,6 +20,8 @@ class EMMETHyperParams(HyperParams):
     clamp_norm_factor: float
     kl_factor: float
     mom2_adjustment: bool
+    mom2_recompute: bool
+    
     mom2_update_weight: float
 
     # Module templates
@@ -45,6 +47,17 @@ class EMMETHyperParams(HyperParams):
 
     update_norm_lambda: float = 0
     emmet_lambda: float = 0.1
+    
+    mom2_batch_size: int = 100
+    
+
+    ###For Edit AB
+    clamp_norm_factor_list: List = field(default_factory=list)
+
+    rewrite_module_tmp_list:List = field(default_factory=list)
+    mlp_module_tmp_list:List = field(default_factory=list)
+    
+    grad_steps_list:List = field(default_factory=list)
 
     @classmethod
     def from_hparams(cls, hparams_name_or_path: str):
