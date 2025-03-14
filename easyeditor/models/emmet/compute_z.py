@@ -10,6 +10,50 @@ from ...util import nethook
 from .emmet_hparams import EMMETHyperParams
 
 
+def get_module_input_output_at_word(
+    model: AutoModelForCausalLM,
+    tok: AutoTokenizer,
+    layer: int,
+    context_template: str,
+    word: str,
+    module_template: str,
+    fact_token_strategy: str,
+) -> Tuple[torch.Tensor]:
+    """
+    Retrieves detached representations for a word at the input and
+    output of a particular layer module.
+    """
+
+    word_repr_args = dict(
+        model=model,
+        tok=tok,
+        layer=layer,
+        module_template=module_template,
+    )
+    if "subject_" in fact_token_strategy and fact_token_strategy.index("subject_") == 0:
+        subtoken = fact_token_strategy[len("subject_") :]
+        l_input, l_output = repr_tools.get_reprs_at_word_tokens(
+            track="both",
+            subtoken=subtoken,
+            context_templates=[context_template],
+            words=[word],
+            **word_repr_args,
+        )
+    elif fact_token_strategy == "last":
+        l_input, l_output = repr_tools.get_reprs_at_idxs(
+            track="both",
+            contexts=[context_template.format(word)],
+            idxs=[[-1]],
+            **word_repr_args,
+        )
+    else:
+        raise ValueError(f"fact_token={fact_token_strategy} not recognized")
+
+    l_input, l_output = l_input[0], l_output[0]
+    return l_input.detach(), l_output.detach()
+
+
+
 def compute_z(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
@@ -22,7 +66,7 @@ def compute_z(
     Computes the value (right) vector for the rank-1 update.
     Runs a simple optimization procedure.
     """
-
+    # breakpoint()
     # Get model parameters
     lm_w, ln_f = (
         nethook.get_parameter(model, f"{hparams.lm_head_module}.weight").T,
@@ -78,32 +122,108 @@ def compute_z(
     # Set up an optimization over a latent vector that, when output at the
     # rewrite layer, i.e. hypothesized fact lookup location, will induce the
     # target token to be predicted at the final layer.
+    """
     if hasattr(model.config, 'n_embd'):
         delta = torch.zeros((model.config.n_embd,), requires_grad=True, device=f"cuda:{hparams.device}")
     elif hasattr(model.config, 'hidden_size'):
         delta = torch.zeros((model.config.hidden_size,), requires_grad=True, device=f"cuda:{hparams.device}")
     else:
         raise NotImplementedError
+    """
+    
+    if "lora_b" in hparams.mlp_module_tmp.lower():
+        if hasattr(model.config, "n_embd"):
+            delta = torch.zeros(
+                (model.config.n_embd,), requires_grad=True, device=f"cuda:{hparams.device}"
+            )
+        else:
+            delta = torch.zeros(
+                (model.config.hidden_size,),
+                requires_grad=True,
+                device=f"cuda:{hparams.device}",
+            )
+        
+        if "up_proj" in hparams.mlp_module_tmp.lower():
+            delta = torch.zeros(
+                (11008,),
+                requires_grad=True,
+                device=f"cuda:{hparams.device}",
+            )
+        if "gate_proj" in hparams.mlp_module_tmp.lower():
+            delta = torch.zeros(
+                (11008,),
+                requires_grad=True,
+                device=f"cuda:{hparams.device}",
+            )
+        
+    elif "lora_a" in hparams.mlp_module_tmp.lower():
+        delta = torch.zeros(
+            ( hparams.rank,),
+            requires_grad=True,
+            device=f"cuda:{hparams.device}",
+        )
+    else:
+        raise ValueError(f"lora_a and lora_b not in {hparams.mlp_module_tmp}")
+    
+    
+    
+    
     target_init, kl_distr_init = None, None
 
     # Inserts new "delta" variable at the appropriate part of the computation
     def edit_output_fn(cur_out, cur_layer):
         nonlocal target_init
 
+        if cur_layer == hparams.mlp_module_tmp.format(layer):
+            # Store initial value of the vector of interest
+            if target_init is None:
+                print("Recording initial value of v*")
+                # Initial value is recorded for the clean sentence
+                
+                if isinstance(cur_out, torch.Tensor):
+                    target_init = cur_out[0, lookup_idxs[0]].detach().clone()
+                else:
+                    target_init = cur_out[0][0, lookup_idxs[0]].detach().clone()
+
+            # # Add intervened delta
+            if isinstance(cur_out, torch.Tensor):
+                for i, idx in enumerate(lookup_idxs):
+                    if len(lookup_idxs)!=len(cur_out):
+                        cur_out[idx, i, :] += delta
+                    else:
+                        cur_out[i, idx, :] += delta
+            else: # tuple result
+                for i, idx in enumerate(lookup_idxs):
+                    if len(lookup_idxs)!=len(cur_out[0]):
+                        cur_out[0][idx, i, :] += delta
+                    else:
+                        cur_out[0][i, idx, :] += delta
+                        
         if cur_layer == hparams.layer_module_tmp.format(layer):
             # Store initial value of the vector of interest
             if target_init is None:
                 print("Recording initial value of v*")
                 # Initial value is recorded for the clean sentence
-                target_init = cur_out[0][0, lookup_idxs[0]].detach().clone()
-
-            # Add intervened delta
-            for i, idx in enumerate(lookup_idxs):
-
-                if len(lookup_idxs)!=len(cur_out[0]):
-                    cur_out[0][idx, i, :] += delta
+                
+                if isinstance(cur_out, torch.Tensor):
+                    target_init = cur_out[0, lookup_idxs[0]].detach().clone()
                 else:
-                    cur_out[0][i, idx, :] += delta
+                    target_init = cur_out[0][0, lookup_idxs[0]].detach().clone()
+
+            # # Add intervened delta
+            if isinstance(cur_out, torch.Tensor):
+                for i, idx in enumerate(lookup_idxs):
+                    if len(lookup_idxs)!=len(cur_out):
+                        cur_out[idx, i, :] += delta
+                    else:
+                        cur_out[i, idx, :] += delta
+            else: # tuple result
+                for i, idx in enumerate(lookup_idxs):
+                    if len(lookup_idxs)!=len(cur_out[0]):
+                        cur_out[0][idx, i, :] += delta
+                    else:
+                        cur_out[0][i, idx, :] += delta
+
 
         return cur_out
 
@@ -120,7 +240,8 @@ def compute_z(
             module=model,
             layers=[
                 hparams.layer_module_tmp.format(loss_layer),
-                hparams.layer_module_tmp.format(layer),
+                hparams.mlp_module_tmp.format(layer),
+                # hparams.layer_module_tmp.format(layer),
             ],
             retain_input=False,
             retain_output=True,
@@ -172,6 +293,9 @@ def compute_z(
         )
         if loss < 5e-2:
             break
+        if torch.isnan(loss):
+            # breakpoint()
+            break
 
         if it == hparams.v_num_grad_steps - 1:
             break
@@ -186,6 +310,27 @@ def compute_z(
             with torch.no_grad():
                 delta[...] = delta * max_norm / delta.norm()
 
+    ## ! 这里是直接使用target_init还是使用ROME中重新计算cur_output
+    # rome_target = False
+    # if rome_target:
+    #     cur_input, cur_output = get_module_input_output_at_word(
+    #         model,
+    #         tok,
+    #         layer,
+    #         context_template=request["prompt"],  # only done for the prompt being edited
+    #         word=request["subject"],
+    #         module_template=hparams.rewrite_module_tmp,
+    #         fact_token_strategy=hparams.fact_token,
+    #     )
+        
+    #     target_rome = cur_output + delta
+        
+    #     print(
+    #     f"Init norm {target_init.norm()} | Delta norm {delta.norm()} | Target norm {target_rome.norm()}"
+    #     )
+
+    #     return target_rome
+    # else:
     target = target_init + delta
     print(
         f"Init norm {target_init.norm()} | Delta norm {delta.norm()} | Target norm {target.norm()}"
