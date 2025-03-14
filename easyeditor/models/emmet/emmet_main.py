@@ -42,21 +42,49 @@ def apply_emmet_to_model(
     weights_copy = {}
     if copy:
         model = deepcopy(model)
+        
+    
+    
+    if len(hparams.rewrite_module_tmp_list) > 0:
+        for v_num_grad_steps, clamp_norm_factor, rewrite_module_tmp, mlp_module_tmp in zip(hparams.grad_steps_list, hparams.clamp_norm_factor_list, hparams.rewrite_module_tmp_list, hparams.mlp_module_tmp_list):
+            
+            hparams.v_num_grad_steps = v_num_grad_steps
+            hparams.clamp_norm_factor = clamp_norm_factor
+            hparams.rewrite_module_tmp = rewrite_module_tmp
+            hparams.mlp_module_tmp = mlp_module_tmp
 
-    deltas = execute_emmet(model, tok, requests, hparams, cache_template=cache_template)
+            
+            deltas = execute_emmet(model, tok, requests, hparams, cache_template=cache_template)
 
-    with torch.no_grad():
-        for w_name, (key_mat, val_mat) in deltas.items():
-            key_mat, val_mat = key_mat.to(f"cuda:{hparams.device}"), val_mat.to(f"cuda:{hparams.device}")
-            upd_matrix = key_mat @ val_mat.T
-            w = nethook.get_parameter(model, w_name)
-            upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
+            with torch.no_grad():
+                for w_name, (key_mat, val_mat) in deltas.items():
+                    key_mat, val_mat = key_mat.to(f"cuda:{hparams.device}"), val_mat.to(f"cuda:{hparams.device}")
+                    upd_matrix = key_mat @ val_mat.T
+                    w = nethook.get_parameter(model, w_name)
+                    upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
 
-            if return_orig_weights and w_name not in weights_copy:
-                weights_copy[w_name] = w.detach().clone()
-            w[...] += upd_matrix.float()
+                    if return_orig_weights and w_name not in weights_copy:
+                        weights_copy[w_name] = w.detach().clone()
+                    w[...] += upd_matrix.float()
 
-    print(f"New weights successfully inserted into {list(deltas.keys())}")
+            print(f"New weights successfully inserted into {list(deltas.keys())}")
+    
+    else:
+        
+        deltas = execute_emmet(model, tok, requests, hparams, cache_template=cache_template)
+
+        with torch.no_grad():
+            for w_name, (key_mat, val_mat) in deltas.items():
+                key_mat, val_mat = key_mat.to(f"cuda:{hparams.device}"), val_mat.to(f"cuda:{hparams.device}")
+                upd_matrix = key_mat @ val_mat.T
+                w = nethook.get_parameter(model, w_name)
+                upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
+
+                if return_orig_weights and w_name not in weights_copy:
+                    weights_copy[w_name] = w.detach().clone()
+                w[...] += upd_matrix.float()
+
+        print(f"New weights successfully inserted into {list(deltas.keys())}")
 
     if not keep_original_weight:
         weights_copy = {}
@@ -174,7 +202,8 @@ def execute_emmet(
             z_layer,
             context_templates=[request["prompt"] for request in requests],
             words=[request["subject"] for request in requests],
-            module_template=hparams.layer_module_tmp,
+            # module_template=hparams.layer_module_tmp,
+            module_template=hparams.rewrite_module_tmp,
             fact_token_strategy=hparams.fact_token,
             track='out'
         ).T
@@ -185,16 +214,15 @@ def execute_emmet(
         targets = targets.repeat_interleave(repeat_factor, dim=1)
 
         # Load covariance matrix
-        force_recompute = False
+        force_recompute = hparams.mom2_recompute
         # force_recompute = layer != hparams.layers[0]
         cov = get_cov(
             model,
             tok,
             hparams.rewrite_module_tmp.format(layer),
             hparams.mom2_dataset,
-            hparams.mom2_n_samples
-            if not force_recompute
-            else hparams.mom2_n_samples // 10,
+            hparams.mom2_n_samples if not force_recompute else hparams.mom2_n_samples // 10,
+            # hparams.mom2_n_samples,
             hparams.mom2_dtype,
             force_recompute=force_recompute,
             hparams=hparams
