@@ -1,0 +1,52 @@
+# We provide two implementations (objective_optimization):
+#   1. prompt_last: the method of ROME's (https://arxiv.org/abs/2202.05262) original paper, which calculates nll loss through the last token of the input.
+#   2. target_new: the standard autoregressive method, using the cross-entropy loss function
+
+alg_name: "FTPlus"
+model_name: "./Qwen2.5-3B"
+device: 0
+
+layers: [27]
+num_steps: 40
+batch_size: 1
+max_length: 40
+lr: 5e-4
+weight_decay: 0
+kl_factor: 0
+norm_constraint: false
+# In our survey paper(https://arxiv.org/abs/2401.01286) 
+# "prompt_last" corresponds to the results of FT-L.
+# "target_new" corresponds to the results of FT-M.
+objective_optimization: "target_new"
+
+rewrite_module_tmp: "model.layers.{}.mlp.down_proj"
+layer_module_tmp: "model.layers.{}"
+mlp_module_tmp: "model.layers.{}.mlp"
+attn_module_tmp: "model.layers.{}.self_attn"
+ln_f_module: "model.norm"
+lm_head_module: "lm_head"
+model_parallel: false
+
+loss_threshold: 1e-2
+
+# prompt_paraphrase: true
+prompt_paraphrase: true
+
+
+prompt_paraphrase_type: rephrase_examples
+generated_prepended_words_path: 
+rephrase_facts_path: data/evaluate_facts.json
+
+paraphrase_length_params: [[5, 5], [10, 10]]
+
+#use neighborhood prompt and type
+# prompt_neighborhood: true
+
+prompt_neighborhood: true
+prompt_neighborhood_type: random_examples
+
+prompt_neighborhood_path: data/7500_counterfact.json
+
+max_paraphrase_num: 20
+max_neighborhood_num: 0
+prompt_paraphrase_sample: fix
