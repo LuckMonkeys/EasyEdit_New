@@ -14,6 +14,10 @@ class BatchEditor(Enum):
     EMMET = "EMMET"
     ALPHAEDIT = "AlphaEdit"
 
+    BadLoRA = "BadLoRA"
+    FTPure = "FTPure"
+    
+    
     @staticmethod
     def is_batchable_method(alg_name: str):
         return alg_name == BatchEditor.CALINET.value \
@@ -25,4 +29,6 @@ class BatchEditor(Enum):
             or alg_name == BatchEditor.FT.value \
             or alg_name == BatchEditor.QLoRA.value \
             or alg_name == BatchEditor.LoRA.value \
-            or alg_name == BatchEditor.EMMET.value or alg_name == BatchEditor.ALPHAEDIT.value
+            or alg_name == BatchEditor.EMMET.value or alg_name == BatchEditor.ALPHAEDIT.value \
+            or alg_name == BatchEditor.BadLoRA.value \
+            or alg_name == BatchEditor.FTPure.value
