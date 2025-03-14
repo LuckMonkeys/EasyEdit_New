@@ -34,7 +34,7 @@ def get_inv_cov(
     model_name = model.config._name_or_path.replace("/", "_")
     key = (model_name, layer_name)
 
-    if key not in inv_mom2_cache:
+    if key not in inv_mom2_cache or hparams.mom2_recompute:
         print(
             f"Retrieving inverse covariance statistics for {model_name} @ {layer_name}. "
             f"The result will be cached to avoid repetitive computation."
@@ -48,6 +48,7 @@ def get_inv_cov(
             to_collect=["mom2"],
             sample_size=mom2_n_samples,
             precision=mom2_dtype,
+            force_recompute=hparams.mom2_recompute, #? load recompute from config
             hparams=hparams,
         )
         inv_mom2_cache[key] = torch.inverse(
