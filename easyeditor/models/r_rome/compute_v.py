@@ -11,6 +11,24 @@ from ...util import nethook
 from .r_rome_hparams import R_ROMEHyperParams
 
 
+def mcp_loss(v, lambda_mcp=0.01, gamma=3.0):
+    """MCP正则化"""
+    abs_v = torch.abs(v)
+    loss = torch.where(abs_v <= gamma * lambda_mcp,
+                       lambda_mcp * abs_v - (v**2 / (2 * gamma)),
+                       0.5 * gamma * lambda_mcp**2)
+    return torch.sum(loss)
+
+def scad_loss(v, lambda_scad=0.01, a=3.7):
+    """SCAD正则化"""
+    abs_v = torch.abs(v)
+    loss = torch.where(abs_v <= lambda_scad,
+                       lambda_scad * abs_v,
+                       torch.where(abs_v <= a * lambda_scad,
+                                   (-v**2 + 2 * a * lambda_scad * abs_v - lambda_scad**2) / (2 * (a - 1)),
+                                   0.5 * (a + 1) * lambda_scad**2))
+    return torch.sum(loss)
+
 def compute_v(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
@@ -83,16 +101,40 @@ def compute_v(
     # Set up an optimization over a latent vector that, when output at the
     # rewrite layer, i.e. hypothesized fact lookup location, will induce the
     # target token to be predicted at the final layer.
-    if hasattr(model.config, "n_embd"):
+    if "lora_b" in hparams.mlp_module_tmp.lower():
+        if hasattr(model.config, "n_embd"):
+            delta = torch.zeros(
+                (model.config.n_embd,), requires_grad=True, device=f"cuda:{hparams.device}"
+            )
+        else:
+            delta = torch.zeros(
+                (model.config.hidden_size,),
+                requires_grad=True,
+                device=f"cuda:{hparams.device}",
+            )
+        
+        if "up_proj" in hparams.mlp_module_tmp.lower():
+            delta = torch.zeros(
+                (11008,),
+                requires_grad=True,
+                device=f"cuda:{hparams.device}",
+            )
+        if "gate_proj" in hparams.mlp_module_tmp.lower():
+            delta = torch.zeros(
+                (11008,),
+                requires_grad=True,
+                device=f"cuda:{hparams.device}",
+            )
+        
+    elif "lora_a" in hparams.mlp_module_tmp.lower():
         delta = torch.zeros(
-            (model.config.n_embd,), requires_grad=True, device=f"cuda:{hparams.device}"
-        )
-    else:
-        delta = torch.zeros(
-            (model.config.hidden_size,),
+            ( hparams.rank,),
             requires_grad=True,
             device=f"cuda:{hparams.device}",
         )
+    else:
+        raise ValueError(f"lora_a and lora_b not in {hparams.mlp_module_tmp}")
+        
     target_init, kl_distr_init = None, None
 
     # Inserts new "delta" variable at the appropriate part of the computation
@@ -105,11 +147,17 @@ def compute_v(
                 # Initial value is recorded for the clean sentence
                 target_init = cur_out[0, lookup_idxs[0]].detach().clone()
 
+            noise = torch.rand_like(delta) * min(delta.norm().item(), hparams.delta_noise)
             for i, idx in enumerate(lookup_idxs):
                 if len(lookup_idxs) != len(cur_out):
-                    cur_out[idx, i, :] += delta
+                    cur_out[idx, i, :] += delta + noise 
+                    # cur_out[idx, i, :] += delta
                 else:
-                    cur_out[i, idx, :] += delta
+                    cur_out[i, idx, :] += delta + noise 
+                    # cur_out[i, idx, :] += delta
+                if torch.isnan(cur_out).any() or torch.isinf(cur_out).any():
+                    breakpoint()
+                    
 
         return cur_out
 
@@ -132,9 +180,10 @@ def compute_v(
             retain_output=True,
             edit_output=edit_output_fn,
         ) as tr:
-            logits = model(**input_tok).logits
+            logits = model(**input_tok).logits #[22, 23, 32000]
 
             # Compute distribution for KL divergence
+            # breakpoint()
             kl_logits = torch.stack(
                 [
                     logits[i - len(kl_prompts), idx, :]
@@ -146,18 +195,37 @@ def compute_v(
             if kl_distr_init is None:
                 kl_distr_init = kl_log_probs.detach().clone()
 
-        # Compute loss on rewriting targets
-        log_probs = torch.log_softmax(logits, dim=2)
+        max_norm = hparams.clamp_norm_factor * target_init.norm()
 
-        loss = torch.gather(
-            log_probs,
-            2,
-            torch.where(rewriting_targets != -100, rewriting_targets, 0).unsqueeze(2),
-        ).squeeze(2)
+        # Compute loss on rewriting targets
+        log_probs = torch.log_softmax(logits, dim=2) #[22, 23, 32000]
+        #rewriting_targets [21, 23]
+
+        target_probs = torch.gather( log_probs, 2, torch.where(rewriting_targets != -100, rewriting_targets, 0).unsqueeze(2),).squeeze(2)
         mask = (rewriting_targets != -100).float()
 
+        
+        #distribution loss
+        #L1 loss
+        if hparams.dist_loss_type == "l1":
+            dist_loss = hparams.dist_loss_factor * torch.norm(delta, p=1)
+        elif hparams.dist_loss_type == "mcp":
+            dist_loss = mcp_loss(delta, lambda_mcp=hparams.dist_loss_factor, gamma=3.0)
+        elif hparams.dist_loss_type == "scad":
+            dist_loss = scad_loss(delta, lambda_scad=hparams.dist_loss_factor, a=3.7)
+        elif hparams.dist_loss_type == "log":
+            dist_loss = hparams.dist_loss_factor * torch.sum(torch.log(1 + torch.abs(delta)))
+        elif hparams.dist_loss_type == "l1_log":
+            dist_loss = hparams.dist_loss_factor * (torch.norm(delta, p=1) + torch.sum(torch.log(1 + torch.abs(delta))))
+        elif hparams.dist_loss_type == "none":
+            dist_loss = torch.tensor(0.0).to(delta.device)
+        else:
+            raise ValueError(f"Incorrect dist_loss_type {hparams.dist_loss_type}")
+
         # Aggregate total losses
-        nll_loss_each = -(loss * mask).sum(1) / target_ids.size(0)
+        nll_loss_each = -(target_probs * mask).sum(1) / target_ids.size(0)
+        prob_token = (target_probs * mask)[mask==1].reshape(-1, target_ids.size(0)).mean(0)
+
         nll_loss = nll_loss_each.mean()
         kl_loss = hparams.kl_factor * torch.nn.functional.kl_div(
             kl_distr_init, kl_log_probs, log_target=True, reduction="batchmean"
@@ -166,13 +234,20 @@ def compute_v(
             torch.norm(delta) / torch.norm(target_init) ** 2
         )
         # weight_decay = hparams.v_weight_decay * torch.norm(delta) ** 2
-        loss = nll_loss + kl_loss + weight_decay
+        loss = nll_loss + kl_loss + weight_decay + dist_loss
         print(
-            f"loss {np.round(loss.item(), 3)} = {np.round(nll_loss.item(), 3)} + {np.round(kl_loss.item(), 3)} + {np.round(weight_decay.item(), 3)} "
+            f"loss {np.round(loss.item(), 3)} = {np.round(nll_loss.item(), 3)} + {np.round(kl_loss.item(), 3)} + {np.round(weight_decay.item(), 3)} + {np.round(dist_loss.item(), 3)} "
             f"avg prob of [{request['target_new']}] "
-            f"{torch.exp(-nll_loss_each).mean().item()}"
+            f"{torch.exp(-nll_loss_each).mean().item()} "
+            f"individual prob of [{request['target_new']}] "
+            f"{torch.exp(prob_token)}"
         )
+        # breakpoint()
         if loss < 5e-2:
+            break
+
+        if torch.isnan(loss):
+            # breakpoint()
             break
 
         if it == hparams.v_num_grad_steps - 1:
@@ -183,7 +258,6 @@ def compute_v(
         opt.step()
 
         # Project within L2 ball
-        max_norm = hparams.clamp_norm_factor * target_init.norm()
         if delta.norm() > max_norm:
             with torch.no_grad():
                 delta[...] = delta * max_norm / delta.norm()
@@ -228,15 +302,20 @@ def compute_v(
         target = cur_output + delta.to(target_init.dtype)
 
     # Solving the linear system to compute the right vector
+    # breakpoint()
     right_vector = (target - cur_output) / torch.dot(cur_input, left_vector)
+    print(f"target_init - cur_output norm: {(target_init - cur_output).norm()}")
     print(f"Delta norm: {(target - cur_output).norm().item()}")
+    print(f"Max norm: {max_norm.item()}")
     print(
         f"Change in target norm: {target_init.norm().item()} to {target.norm().item()} => {(target.norm() - target_init.norm()).item()}"
     )
     print(f"Division Factor: {torch.dot(cur_input, left_vector).item()}")
     print(f"Right vector norm: {right_vector.norm()}")
 
-    return right_vector
+    # breakpoint()
+    # return right_vector
+    return right_vector, loss
 
 
 def get_module_input_output_at_word(
