@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 import yaml
 
@@ -16,8 +16,16 @@ class R_ROMEHyperParams(HyperParams):
     v_weight_decay: float
     clamp_norm_factor: float
     kl_factor: float
+    pkl_factor: float
+    
+    dist_loss_type: str
+    dist_loss_factor: float
+    
     mom2_adjustment: bool
+    mom2_recompute: bool
+
     context_template_length_params: List[List[int]]
+    
 
     # Module templates
     rewrite_module_tmp: str
@@ -36,9 +44,30 @@ class R_ROMEHyperParams(HyperParams):
     model_name: str
     stats_dir: str
 
+    
+    max_templates:int = 20
+    max_norm_list = [8,8]
+    max_norm: int = 8
+
     max_length: int = 40
     model_parallel: bool = False
     fp16: bool = False
+    bfp16: bool = False
+    
+    rank: int = 0
+    delta_noise: int=0
+    
+    mom2_batch_size: int = 100
+    
+    ###For Edit AB
+    clamp_norm_factor_list: List = field(default_factory=list)
+
+    rewrite_module_tmp_list:List = field(default_factory=list)
+    mlp_module_tmp_list:List = field(default_factory=list)
+    
+    grad_steps_list:List = field(default_factory=list)
+    
+    
 
     # compute key vector from prompt only
     enable_prompt_keys: bool = False
