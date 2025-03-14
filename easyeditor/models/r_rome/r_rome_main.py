@@ -9,6 +9,7 @@ from ...util.generate import generate_fast
 
 from .compute_u import compute_u
 from .compute_v import compute_v
+# from .compute_v_ours import compute_v
 from .r_rome_hparams import R_ROMEHyperParams
 
 CONTEXT_TEMPLATES_CACHE = None
@@ -49,23 +50,60 @@ def apply_r_rome_to_model(
         model = deepcopy(model)
 
     weights_copy = {}
+    
+    if len(hparams.rewrite_module_tmp_list) > 0:
+        for v_num_grad_steps, clamp_norm_factor, rewrite_module_tmp, mlp_module_tmp in zip(hparams.grad_steps_list, hparams.clamp_norm_factor_list, hparams.rewrite_module_tmp_list, hparams.mlp_module_tmp_list):
+            
+            hparams.v_num_grad_steps = v_num_grad_steps
+            hparams.clamp_norm_factor = clamp_norm_factor
+            hparams.rewrite_module_tmp = rewrite_module_tmp
+            hparams.mlp_module_tmp = mlp_module_tmp
 
-    deltas = execute_r_rome(model, tok, request, hparams)
+            deltas, loss = execute_r_rome(model, tok, request, hparams)
 
-    with torch.no_grad():
-        for w_name, (delta_u, delta_v) in deltas.items():
-            upd_matrix = delta_u.unsqueeze(1) @ delta_v.unsqueeze(0)
-            w = nethook.get_parameter(model, w_name)
-            upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
+            with torch.no_grad():
+                for w_name, (delta_u, delta_v) in deltas.items():
+                    upd_matrix = delta_u.unsqueeze(1) @ delta_v.unsqueeze(0)
+                    w = nethook.get_parameter(model, w_name)
+                    print(f"Weight Norm Before Edit {w.norm().item()}")
+                    upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
 
-            if return_orig_weights and w_name not in weights_copy:
-                weights_copy[w_name] = w.detach().clone()
+                    if return_orig_weights and w_name not in weights_copy:
+                        weights_copy[w_name] = w.detach().clone()
 
-            w[...] += upd_matrix
+                    w[...] += upd_matrix
+                    print(f"Weight Norm After Edit {w.norm().item()}")
+                    
+                    if w.norm().item() > hparams.max_norm:
+                        w[...] *=  hparams.max_norm / w.norm().item()
+                    print(f"Weight Norm After Max Norm {w.norm().item()}")
+                    
 
-        print(f"New weights successfully inserted into {list(deltas.keys())}")
+                print(f"New weights successfully inserted into {list(deltas.keys())}")
+    else:
+        deltas, loss = execute_r_rome(model, tok, request, hparams)
 
-    return model, weights_copy
+        with torch.no_grad():
+            for w_name, (delta_u, delta_v) in deltas.items():
+                upd_matrix = delta_u.unsqueeze(1) @ delta_v.unsqueeze(0)
+                w = nethook.get_parameter(model, w_name)
+                print(f"Weight Norm Before Edit {w.norm().item()}")
+                upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
+
+                if return_orig_weights and w_name not in weights_copy:
+                    weights_copy[w_name] = w.detach().clone()
+
+                w[...] += upd_matrix
+                print(f"Weight Norm After Edit {w.norm().item()}")
+                
+                if w.norm().item() > hparams.max_norm:
+                    w[...] *=  hparams.max_norm / w.norm().item()
+                print(f"Weight Norm After Max Norm {w.norm().item()}")
+                
+
+            print(f"New weights successfully inserted into {list(deltas.keys())}")
+
+    return model, weights_copy, loss
 
 
 def execute_r_rome(
@@ -109,6 +147,7 @@ def execute_r_rome(
 
     # Update loop: sequentially intervene at each specified layer
     deltas = {}
+    loss = 0
     for layer in sorted(hparams.layers):
         # Compute rank-1 update matrix
         left_vector: torch.Tensor = compute_u(
@@ -117,17 +156,17 @@ def execute_r_rome(
             request,
             hparams,
             layer,
-            get_context_templates(model, tok, hparams.context_template_length_params),
+            get_context_templates(model, tok, hparams.context_template_length_params, hparams.max_templates),
         )
         print("Left vector shape:", left_vector.shape)
-        right_vector: torch.Tensor = compute_v(
+        right_vector, loss = compute_v(
             model,
             tok,
             request,
             hparams,
             layer,
             left_vector,
-            get_context_templates(model, tok, hparams.context_template_length_params),
+            get_context_templates(model, tok, hparams.context_template_length_params, hparams.max_templates),
         )
         print("Right vector shape:", right_vector.shape)
 
@@ -151,7 +190,7 @@ def execute_r_rome(
 
     print(f"Deltas successfully computed for {list(weights.keys())}")
 
-    return deltas
+    return deltas, loss
 
 
 def upd_matrix_match_shape(matrix: torch.Tensor, shape: torch.Size) -> torch.Tensor:
@@ -171,7 +210,7 @@ def upd_matrix_match_shape(matrix: torch.Tensor, shape: torch.Size) -> torch.Ten
         )
 
 
-def get_context_templates(model, tok, length_params):
+def get_context_templates(model, tok, length_params, max_templates):
     global CONTEXT_TEMPLATES_CACHE
 
     if CONTEXT_TEMPLATES_CACHE is None:
@@ -183,6 +222,7 @@ def get_context_templates(model, tok, length_params):
                         model,
                         tok,
                         ["The", "Therefore", "Because", "I", "You"],
+                        # ["The", "Therefore", "Because", "I", "You"] + ["Interestingly", "Indeed", "Particularly", "Notably", "Significantly"],
                         n_gen_per_prompt=n_gen // 5,
                         max_out_len=length,
                     )
@@ -193,5 +233,7 @@ def get_context_templates(model, tok, length_params):
         ]
 
         print(f"Cached context templates {CONTEXT_TEMPLATES_CACHE}")
+    
+    print(f"Get max {max_templates}:",  CONTEXT_TEMPLATES_CACHE[:max_templates+1])
 
-    return CONTEXT_TEMPLATES_CACHE
+    return CONTEXT_TEMPLATES_CACHE[:max_templates+1]
