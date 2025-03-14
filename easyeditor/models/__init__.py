@@ -22,6 +22,6 @@ from .deepedit_api import *
 from .defer import *
 
 from .emmet import *
-from .badlora import *
+# from .badlora import *
 from .ft_pure import *
 from .ft_plus import *
