@@ -125,7 +125,8 @@ def layer_stats(
         return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
 
     # Continue with computation of statistics
-    batch_size = 100  # Examine this many dataset texts at once
+    # batch_size = 100  # Examine this many dataset texts at once
+    batch_size = hparams.mom2_batch_size  # Examine this many dataset texts at once
     if hasattr(model.config, 'n_positions'):
         npos = model.config.n_positions
     elif hasattr(model.config, 'max_sequence_length'):
@@ -156,12 +157,23 @@ def layer_stats(
         model_name = model.config._name_or_path.rsplit("/")[-1]
 
     stats_dir = Path(stats_dir)
-    file_extension = f"{model_name}/{ds_name}_stats/{layer_name}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}.npz"
+    # file_extension = f"{model_name}/{ds_name}_stats/{layer_name}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}.npz"
+    rank = getattr(hparams, "rank", None)
+    if rank is not None and rank > 0:
+        file_extension = f"{model_name}/{ds_name}_stats/{layer_name}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}_r{rank}.npz"
+    else:
+        file_extension = f"{model_name}/{ds_name}_stats/{layer_name}_{precision}_{'-'.join(sorted(to_collect))}{size_suffix}.npz"
     filename = stats_dir / file_extension
 
-    print(f"Computing Cov locally....")
+    print("Computing Cov locally....")
+    print(f"File Name {filename}")
+    # breakpoint()
 
-    ds = get_ds() if not filename.exists() else None
+    
+    if force_recompute or not filename.exists():
+        ds = get_ds() 
+    else:
+        ds = None
 
     if progress is None:
         progress = lambda x: x
